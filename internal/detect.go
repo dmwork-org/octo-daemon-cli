@@ -169,9 +169,8 @@ func isOpenclawGatewayRunning(binPath string) bool {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, binPath, "gateway", "status")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		log.Printf("[DEBUG] openclaw gateway status cmd error: %v", err)
+	out, _ := cmd.CombinedOutput()
+	if len(out) == 0 {
 		return false
 	}
 
@@ -267,10 +266,19 @@ func detectOpenclawPlugins() []PluginInfo {
 // Looks for a line that is exactly "[" (trimmed) to start the JSON block.
 func extractJSONArray(data []byte) []byte {
 	lines := bytes.Split(data, []byte("\n"))
+	start := -1
+	end := -1
 	for i, line := range lines {
-		if bytes.Equal(bytes.TrimSpace(line), []byte("[")) {
-			return bytes.Join(lines[i:], []byte("\n"))
+		trimmed := bytes.TrimSpace(line)
+		if start == -1 && bytes.Equal(trimmed, []byte("[")) {
+			start = i
+		}
+		if start != -1 && bytes.Equal(trimmed, []byte("]")) {
+			end = i
 		}
 	}
-	return nil
+	if start == -1 || end == -1 {
+		return nil
+	}
+	return bytes.Join(lines[start:end+1], []byte("\n"))
 }
