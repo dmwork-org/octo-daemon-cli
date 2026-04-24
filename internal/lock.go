@@ -10,6 +10,10 @@ func LockFilePath() string {
 	return filepath.Join(dataDir(), "daemon.lock")
 }
 
+func pidFilePath() string {
+	return filepath.Join(dataDir(), "daemon.pid")
+}
+
 // TryLock attempts to acquire an exclusive lock on the lock file.
 // Returns the file handle (caller must keep it open) or an error if locked.
 func TryLock() (*os.File, error) {
@@ -28,13 +32,20 @@ func TryLock() (*os.File, error) {
 		return nil, fmt.Errorf("another daemon is already running. Use 'octo-daemon stop' first")
 	}
 
-	// Write PID into lock file for reference
-	f.Truncate(0)
-	f.Seek(0, 0)
-	fmt.Fprintf(f, "%d\n", os.Getpid())
-	f.Sync()
+	// Write PID to a separate file (readable even while lock is held)
+	WritePID()
 
 	return f, nil
+}
+
+// WritePID writes current PID to daemon.pid (separate from lock file).
+func WritePID() {
+	_ = os.WriteFile(pidFilePath(), []byte(fmt.Sprintf("%d\n", os.Getpid())), 0600)
+}
+
+// RemovePID removes the PID file.
+func RemovePID() {
+	os.Remove(pidFilePath())
 }
 
 // IsLocked checks if the daemon lock is held (non-destructive).
@@ -47,15 +58,15 @@ func IsLocked() bool {
 	defer f.Close()
 
 	if err := lockFile(f); err != nil {
-		return true // locked by another process
+		return true
 	}
 	unlockFile(f)
 	return false
 }
 
-// ReadLockPID reads the PID from the lock file without locking.
+// ReadLockPID reads the PID from daemon.pid file.
 func ReadLockPID() (int, error) {
-	data, err := os.ReadFile(LockFilePath())
+	data, err := os.ReadFile(pidFilePath())
 	if err != nil {
 		return 0, err
 	}

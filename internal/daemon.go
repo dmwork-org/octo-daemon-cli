@@ -46,6 +46,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	d.lockFile = lockFile
 	defer func() {
+		RemovePID()
 		d.lockFile.Close()
 		os.Remove(LockFilePath())
 	}()
