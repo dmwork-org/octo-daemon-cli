@@ -43,33 +43,50 @@ var providers = map[string]string{
 }
 
 func DetectRuntimes() []RuntimeInfo {
-	var runtimes []RuntimeInfo
+	type result struct {
+		rt    RuntimeInfo
+		found bool
+	}
+
+	ch := make(chan result, len(providers))
+
 	for provider, binary := range providers {
-		binPath, err := exec.LookPath(binary)
-		if err != nil {
-			continue
-		}
-		version := detectVersion(binPath)
-		status := "online"
-		if provider == "openclaw" {
-			gwRunning := isOpenclawGatewayRunning(binPath)
-			log.Printf("[DEBUG] openclaw gateway running: %v", gwRunning)
-			if !gwRunning {
-				status = "offline"
+		go func(provider, binary string) {
+			binPath, err := exec.LookPath(binary)
+			if err != nil {
+				ch <- result{found: false}
+				return
 			}
+			version := detectVersion(binPath)
+			status := "online"
+			if provider == "openclaw" {
+				gwRunning := isOpenclawGatewayRunning(binPath)
+				log.Printf("[DEBUG] openclaw gateway running: %v", gwRunning)
+				if !gwRunning {
+					status = "offline"
+				}
+			}
+			rt := RuntimeInfo{
+				Provider: provider,
+				Name:     provider,
+				Version:  version,
+				Status:   status,
+				Path:     binPath,
+			}
+			if provider == "openclaw" {
+				rt.Agents = DetectOpenclawAgents(binPath)
+				rt.Plugins = detectOpenclawPlugins()
+			}
+			ch <- result{rt: rt, found: true}
+		}(provider, binary)
+	}
+
+	var runtimes []RuntimeInfo
+	for range providers {
+		r := <-ch
+		if r.found {
+			runtimes = append(runtimes, r.rt)
 		}
-		rt := RuntimeInfo{
-			Provider: provider,
-			Name:     provider,
-			Version:  version,
-			Status:   status,
-			Path:     binPath,
-		}
-		if provider == "openclaw" {
-			rt.Agents = DetectOpenclawAgents(binPath)
-			rt.Plugins = detectOpenclawPlugins()
-		}
-		runtimes = append(runtimes, rt)
 	}
 	return runtimes
 }
