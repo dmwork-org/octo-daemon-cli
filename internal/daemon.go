@@ -59,22 +59,20 @@ func (d *Daemon) Run(ctx context.Context) error {
 }
 
 func (d *Daemon) register(ctx context.Context) error {
-	runtimes := DetectRuntimesWithDeviceName(d.cfg.DeviceName)
+	// Phase 1: fast detection (LookPath + version + gateway probe) — register immediately
+	runtimes := DetectRuntimesFast()
+	for i := range runtimes {
+		runtimes[i].Name = fmt.Sprintf("%s (%s)", capitalize(runtimes[i].Provider), d.cfg.DeviceName)
+	}
+
 	if len(runtimes) == 0 {
 		log.Printf("[WARN] no agent runtimes detected on this machine")
 	}
 
 	for _, r := range runtimes {
 		log.Printf("[INFO] detected: %s %s (%s)", r.Provider, r.Version, r.Path)
-		if len(r.Agents) > 0 {
-			log.Printf("[INFO]   └─ %d agent(s): %s", len(r.Agents), agentIDs(r.Agents))
-		}
-	}
-
-	d.lastRuntimes = runtimes
-	for _, r := range runtimes {
 		if r.Status != "online" {
-			log.Printf("[INFO] %s status: %s (will skip heartbeat)", r.Provider, r.Status)
+			log.Printf("[INFO]   %s status: %s (will skip heartbeat)", r.Provider, r.Status)
 		}
 	}
 
@@ -90,8 +88,18 @@ func (d *Daemon) register(ctx context.Context) error {
 		return err
 	}
 
+	d.lastRuntimes = runtimes
 	d.registeredRuntimes = resp.Runtimes
 	log.Printf("[INFO] registered %d runtime(s) with server", len(d.registeredRuntimes))
+
+	// Phase 2: slow enrichment (openclaw agents list) — async, then re-register
+	go func() {
+		enriched := EnrichOpenclawAgents(runtimes)
+		if runtimesChanged(runtimes, enriched) {
+			log.Printf("[INFO] enriched runtime details available, re-registering...")
+			d.reRegister(ctx, enriched)
+		}
+	}()
 
 	return nil
 }
@@ -116,8 +124,16 @@ func (d *Daemon) heartbeatLoop(ctx context.Context) error {
 	}
 }
 
+func (d *Daemon) detectWithDeviceName() []RuntimeInfo {
+	runtimes := DetectRuntimesFast()
+	for i := range runtimes {
+		runtimes[i].Name = fmt.Sprintf("%s (%s)", capitalize(runtimes[i].Provider), d.cfg.DeviceName)
+	}
+	return EnrichOpenclawAgents(runtimes)
+}
+
 func (d *Daemon) checkForChanges(ctx context.Context) {
-	current := DetectRuntimesWithDeviceName(d.cfg.DeviceName)
+	current := d.detectWithDeviceName()
 	if !runtimesChanged(d.lastRuntimes, current) {
 		return
 	}
@@ -126,7 +142,7 @@ func (d *Daemon) checkForChanges(ctx context.Context) {
 }
 
 func (d *Daemon) forceReRegister(ctx context.Context) {
-	current := DetectRuntimesWithDeviceName(d.cfg.DeviceName)
+	current := d.detectWithDeviceName()
 	d.reRegister(ctx, current)
 }
 

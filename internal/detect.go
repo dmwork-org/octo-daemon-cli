@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net"
 	"os"
@@ -42,7 +41,9 @@ var providers = map[string]string{
 	"hermes":   "hermes",
 }
 
-func DetectRuntimes() []RuntimeInfo {
+// DetectRuntimesFast does quick detection only (LookPath + version + gateway port probe).
+// Returns immediately without waiting for slow operations like `openclaw agents list`.
+func DetectRuntimesFast() []RuntimeInfo {
 	type result struct {
 		rt    RuntimeInfo
 		found bool
@@ -73,8 +74,8 @@ func DetectRuntimes() []RuntimeInfo {
 				Status:   status,
 				Path:     binPath,
 			}
+			// Plugins from filesystem are fast, include them
 			if provider == "openclaw" {
-				rt.Agents = DetectOpenclawAgents(binPath)
 				rt.Plugins = detectOpenclawPlugins()
 			}
 			ch <- result{rt: rt, found: true}
@@ -91,13 +92,29 @@ func DetectRuntimes() []RuntimeInfo {
 	return runtimes
 }
 
-func DetectRuntimesWithDeviceName(deviceName string) []RuntimeInfo {
-	runtimes := DetectRuntimes()
-	for i := range runtimes {
-		runtimes[i].Name = fmt.Sprintf("%s (%s)", capitalize(runtimes[i].Provider), deviceName)
+// EnrichOpenclawAgents runs the slow `openclaw agents list --json` and returns
+// the enriched runtimes. Call this asynchronously after initial registration.
+func EnrichOpenclawAgents(runtimes []RuntimeInfo) []RuntimeInfo {
+	enriched := make([]RuntimeInfo, len(runtimes))
+	copy(enriched, runtimes)
+	for i := range enriched {
+		if enriched[i].Provider == "openclaw" && enriched[i].Path != "" {
+			agents := DetectOpenclawAgents(enriched[i].Path)
+			if len(agents) > 0 {
+				enriched[i].Agents = agents
+				log.Printf("[INFO]   └─ %d agent(s): %s", len(agents), agentIDs(agents))
+			}
+		}
 	}
-	return runtimes
+	return enriched
 }
+
+// DetectRuntimes does full detection including slow operations (backward compat).
+func DetectRuntimes() []RuntimeInfo {
+	runtimes := DetectRuntimesFast()
+	return EnrichOpenclawAgents(runtimes)
+}
+
 
 type openclawAgentJSON struct {
 	ID        string   `json:"id"`
