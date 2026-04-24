@@ -296,23 +296,53 @@ func detectOpenclawPlugins() []PluginInfo {
 	return plugins
 }
 
-// extractJSONArray finds a JSON array in output that may have non-JSON prefix lines.
-// Looks for a line that is exactly "[" (trimmed) to start the JSON block.
+// extractJSONArray extracts a JSON array from output that may have non-JSON
+// lines before and/or after it. Handles:
+//   - Pretty-printed: lines starting with "[" and ending with "]"
+//   - Single-line: [{"id":"main",...}]
+//   - Mixed with log prefixes
 func extractJSONArray(data []byte) []byte {
+	trimmed := bytes.TrimSpace(data)
+
+	// Try 1: entire output is valid JSON array
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		var test []json.RawMessage
+		if json.Unmarshal(trimmed, &test) == nil {
+			return trimmed
+		}
+	}
+
+	// Try 2: find "[" ... "]" span by lines (pretty-printed with prefix/suffix noise)
 	lines := bytes.Split(data, []byte("\n"))
 	start := -1
 	end := -1
 	for i, line := range lines {
-		trimmed := bytes.TrimSpace(line)
-		if start == -1 && bytes.Equal(trimmed, []byte("[")) {
+		t := bytes.TrimSpace(line)
+		if start == -1 && bytes.Equal(t, []byte("[")) {
 			start = i
 		}
-		if start != -1 && bytes.Equal(trimmed, []byte("]")) {
+		if start != -1 && bytes.Equal(t, []byte("]")) {
 			end = i
 		}
 	}
-	if start == -1 || end == -1 {
-		return nil
+	if start >= 0 && end >= start {
+		candidate := bytes.Join(lines[start:end+1], []byte("\n"))
+		var test []json.RawMessage
+		if json.Unmarshal(candidate, &test) == nil {
+			return candidate
+		}
 	}
-	return bytes.Join(lines[start:end+1], []byte("\n"))
+
+	// Try 3: find first "[" byte and last "]" byte (single-line JSON in noisy output)
+	firstBracket := bytes.IndexByte(data, '[')
+	lastBracket := bytes.LastIndexByte(data, ']')
+	if firstBracket >= 0 && lastBracket > firstBracket {
+		candidate := data[firstBracket : lastBracket+1]
+		var test []json.RawMessage
+		if json.Unmarshal(candidate, &test) == nil {
+			return candidate
+		}
+	}
+
+	return nil
 }

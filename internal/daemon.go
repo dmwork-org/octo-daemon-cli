@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -14,9 +15,11 @@ type Daemon struct {
 	daemonID string
 	lockFile *os.File
 
+	mu                 sync.Mutex
 	registeredRuntimes []RegisteredRuntime
 	lastRuntimes       []RuntimeInfo
 	heartbeatCount     int
+	enriching          bool
 }
 
 func NewDaemon(cfg Config) (*Daemon, error) {
@@ -58,12 +61,15 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return d.heartbeatLoop(ctx)
 }
 
-func (d *Daemon) register(ctx context.Context) error {
-	// Phase 1: fast detection (LookPath + version + gateway probe) — register immediately
-	runtimes := DetectRuntimesFast()
+func (d *Daemon) addDeviceName(runtimes []RuntimeInfo) {
 	for i := range runtimes {
 		runtimes[i].Name = fmt.Sprintf("%s (%s)", capitalize(runtimes[i].Provider), d.cfg.DeviceName)
 	}
+}
+
+func (d *Daemon) register(ctx context.Context) error {
+	runtimes := DetectRuntimesFast()
+	d.addDeviceName(runtimes)
 
 	if len(runtimes) == 0 {
 		log.Printf("[WARN] no agent runtimes detected on this machine")
@@ -76,31 +82,18 @@ func (d *Daemon) register(ctx context.Context) error {
 		}
 	}
 
-	req := RegisterRequest{
-		DaemonID:   d.daemonID,
-		DeviceName: d.cfg.DeviceName,
-		CLIVersion: d.cfg.CLIVersion,
-		Runtimes:   runtimes,
-	}
-
-	resp, err := d.client.Register(ctx, req)
+	resp, err := d.client.Register(ctx, d.buildRegisterRequest(runtimes))
 	if err != nil {
 		return err
 	}
 
+	d.mu.Lock()
 	d.lastRuntimes = runtimes
 	d.registeredRuntimes = resp.Runtimes
-	log.Printf("[INFO] registered %d runtime(s) with server", len(d.registeredRuntimes))
+	d.mu.Unlock()
+	log.Printf("[INFO] registered %d runtime(s) with server", len(resp.Runtimes))
 
-	// Phase 2: slow enrichment (openclaw agents list) — async, then re-register
-	go func() {
-		enriched := EnrichOpenclawAgents(runtimes)
-		if runtimesChanged(runtimes, enriched) {
-			log.Printf("[INFO] enriched runtime details available, re-registering...")
-			d.reRegister(ctx, enriched)
-		}
-	}()
-
+	d.asyncEnrich(ctx, runtimes)
 	return nil
 }
 
@@ -116,52 +109,140 @@ func (d *Daemon) heartbeatLoop(ctx context.Context) error {
 			d.heartbeatCount++
 			d.sendHeartbeats(ctx)
 
-			// Every 4 heartbeats (~60s), re-detect and re-register if changed
 			if d.heartbeatCount%4 == 0 {
-				d.checkForChanges(ctx)
+				go d.checkForChanges(ctx)
 			}
 		}
 	}
 }
 
-func (d *Daemon) detectWithDeviceName() []RuntimeInfo {
-	runtimes := DetectRuntimesFast()
-	for i := range runtimes {
-		runtimes[i].Name = fmt.Sprintf("%s (%s)", capitalize(runtimes[i].Provider), d.cfg.DeviceName)
-	}
-	return EnrichOpenclawAgents(runtimes)
-}
-
 func (d *Daemon) checkForChanges(ctx context.Context) {
-	current := d.detectWithDeviceName()
-	if !runtimesChanged(d.lastRuntimes, current) {
+	current := DetectRuntimesFast()
+	d.addDeviceName(current)
+	current = EnrichOpenclawAgents(current)
+
+	d.mu.Lock()
+	changed := runtimesChanged(d.lastRuntimes, current)
+	d.mu.Unlock()
+
+	if !changed {
 		return
 	}
 	log.Printf("[INFO] runtime changes detected, re-registering...")
-	d.reRegister(ctx, current)
+	d.doRegister(ctx, current)
 }
 
 func (d *Daemon) forceReRegister(ctx context.Context) {
-	current := d.detectWithDeviceName()
-	d.reRegister(ctx, current)
+	current := DetectRuntimesFast()
+	d.addDeviceName(current)
+	current = EnrichOpenclawAgents(current)
+	d.doRegister(ctx, current)
 }
 
-func (d *Daemon) reRegister(ctx context.Context, current []RuntimeInfo) {
-	req := RegisterRequest{
+func (d *Daemon) asyncEnrich(ctx context.Context, base []RuntimeInfo) {
+	d.mu.Lock()
+	if d.enriching {
+		d.mu.Unlock()
+		return
+	}
+	d.enriching = true
+	d.mu.Unlock()
+
+	go func() {
+		defer func() {
+			d.mu.Lock()
+			d.enriching = false
+			d.mu.Unlock()
+		}()
+
+		enriched := EnrichOpenclawAgents(base)
+
+		d.mu.Lock()
+		changed := runtimesChanged(d.lastRuntimes, enriched)
+		d.mu.Unlock()
+
+		if changed {
+			log.Printf("[INFO] enriched runtime details available, re-registering...")
+			d.doRegister(ctx, enriched)
+		}
+	}()
+}
+
+func (d *Daemon) doRegister(ctx context.Context, runtimes []RuntimeInfo) {
+	resp, err := d.client.Register(ctx, d.buildRegisterRequest(runtimes))
+	if err != nil {
+		log.Printf("[WARN] register failed: %v", err)
+		return
+	}
+	d.mu.Lock()
+	d.lastRuntimes = runtimes
+	d.registeredRuntimes = resp.Runtimes
+	d.mu.Unlock()
+	log.Printf("[INFO] registered %d runtime(s)", len(resp.Runtimes))
+}
+
+func (d *Daemon) buildRegisterRequest(runtimes []RuntimeInfo) RegisterRequest {
+	return RegisterRequest{
 		DaemonID:   d.daemonID,
 		DeviceName: d.cfg.DeviceName,
 		CLIVersion: d.cfg.CLIVersion,
-		Runtimes:   current,
+		Runtimes:   runtimes,
+	}
+}
+
+func (d *Daemon) sendHeartbeats(ctx context.Context) {
+	d.mu.Lock()
+	offlineProviders := make(map[string]bool)
+	for _, r := range d.lastRuntimes {
+		if r.Status == "offline" {
+			offlineProviders[r.Provider] = true
+		}
+	}
+	registered := make([]RegisteredRuntime, len(d.registeredRuntimes))
+	copy(registered, d.registeredRuntimes)
+	d.mu.Unlock()
+
+	needReRegister := false
+	for _, rt := range registered {
+		if offlineProviders[rt.Provider] {
+			continue
+		}
+		if err := d.client.Heartbeat(ctx, rt.ID); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("[WARN] heartbeat failed for runtime %d (%s): %v", rt.ID, rt.Provider, err)
+			needReRegister = true
+		}
 	}
 
-	resp, err := d.client.Register(ctx, req)
-	if err != nil {
-		log.Printf("[WARN] re-register failed: %v", err)
+	if needReRegister {
+		log.Printf("[INFO] heartbeat failure detected, forcing re-register...")
+		go d.forceReRegister(ctx)
+	}
+}
+
+func (d *Daemon) deregister() {
+	d.mu.Lock()
+	ids := make([]int64, len(d.registeredRuntimes))
+	for i, rt := range d.registeredRuntimes {
+		ids[i] = rt.ID
+	}
+	d.mu.Unlock()
+
+	if len(ids) == 0 {
 		return
 	}
-	d.lastRuntimes = current
-	d.registeredRuntimes = resp.Runtimes
-	log.Printf("[INFO] re-registered %d runtime(s)", len(d.registeredRuntimes))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := d.client.Deregister(ctx, ids); err != nil {
+		log.Printf("[WARN] deregister failed: %v", err)
+		return
+	}
+
+	log.Printf("[INFO] deregistered %d runtime(s)", len(ids))
 }
 
 func runtimesChanged(old, current []RuntimeInfo) bool {
@@ -177,7 +258,6 @@ func runtimesChanged(old, current []RuntimeInfo) bool {
 		if !ok || prev.Version != r.Version || prev.Status != r.Status || len(prev.Agents) != len(r.Agents) {
 			return true
 		}
-		// Check agent IDs changed
 		for i, a := range r.Agents {
 			if i >= len(prev.Agents) || a.ID != prev.Agents[i].ID || a.Bindings != prev.Agents[i].Bindings {
 				return true
@@ -186,56 +266,6 @@ func runtimesChanged(old, current []RuntimeInfo) bool {
 	}
 	return false
 }
-
-func (d *Daemon) sendHeartbeats(ctx context.Context) {
-	offlineProviders := make(map[string]bool)
-	for _, r := range d.lastRuntimes {
-		if r.Status == "offline" {
-			offlineProviders[r.Provider] = true
-		}
-	}
-
-	needReRegister := false
-	for _, rt := range d.registeredRuntimes {
-		if offlineProviders[rt.Provider] {
-			continue
-		}
-		if err := d.client.Heartbeat(ctx, rt.ID); err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			log.Printf("[WARN] heartbeat failed for runtime %d (%s): %v", rt.ID, rt.Provider, err)
-			needReRegister = true
-		}
-	}
-
-	if needReRegister {
-		log.Printf("[INFO] heartbeat failure detected, forcing re-register...")
-		d.forceReRegister(ctx)
-	}
-}
-
-func (d *Daemon) deregister() {
-	if len(d.registeredRuntimes) == 0 {
-		return
-	}
-
-	ids := make([]int64, len(d.registeredRuntimes))
-	for i, rt := range d.registeredRuntimes {
-		ids[i] = rt.ID
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := d.client.Deregister(ctx, ids); err != nil {
-		log.Printf("[WARN] deregister failed: %v", err)
-		return
-	}
-
-	log.Printf("[INFO] deregistered %d runtime(s)", len(ids))
-}
-
 
 func agentIDs(agents []AgentEntry) string {
 	ids := make([]string, len(agents))
