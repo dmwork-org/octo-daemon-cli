@@ -59,8 +59,7 @@ type HeartbeatRequest struct {
 }
 
 type PendingPing struct {
-	PingID   string `json:"ping_id"`
-	ServerTS int64  `json:"server_ts"`
+	PingID string `json:"ping_id"`
 }
 
 type HeartbeatResponse struct {
@@ -77,13 +76,8 @@ func (c *Client) Heartbeat(ctx context.Context, runtimeID int64) (*HeartbeatResp
 	return &resp, nil
 }
 
-type PingReportRequest struct {
-	DaemonTS int64 `json:"daemon_ts"`
-}
-
-func (c *Client) ReportPing(ctx context.Context, pingID string, daemonTS int64) error {
-	req := PingReportRequest{DaemonTS: daemonTS}
-	return c.postJSON(ctx, "/v1/daemon/ping/"+pingID, req, nil)
+func (c *Client) ReportPing(ctx context.Context, pingID string) error {
+	return c.postJSON(ctx, "/v1/daemon/ping/"+pingID, map[string]string{}, nil)
 }
 
 type DeregisterRequest struct {

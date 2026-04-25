@@ -251,11 +251,10 @@ func (d *Daemon) sendHeartbeats(ctx context.Context) {
 		// Handle pending ping request from server
 		if resp.PendingPing != nil {
 			go func(pp *PendingPing) {
-				daemonTS := time.Now().UnixMilli()
-				if err := d.client.ReportPing(ctx, pp.PingID, daemonTS); err != nil {
+				if err := d.client.ReportPing(ctx, pp.PingID); err != nil {
 					log.Printf("[WARN] ping report failed: %v", err)
 				} else {
-					log.Printf("[INFO] ping reported (id=%s, rtt≈%dms)", pp.PingID, daemonTS-pp.ServerTS)
+					log.Printf("[INFO] ping reported (id=%s)", pp.PingID)
 				}
 			}(resp.PendingPing)
 		}
