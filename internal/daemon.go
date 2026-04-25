@@ -19,10 +19,11 @@ type Daemon struct {
 	mu                 sync.Mutex
 	registeredRuntimes []RegisteredRuntime
 	lastRuntimes       []RuntimeInfo
-	generation         uint64 // incremented on every successful doRegister
+	generation         uint64
 	heartbeatCount     int
 
-	slowDetectRunning atomic.Bool // single-flight guard for slow OpenClaw detection
+	slowDetectRunning atomic.Bool
+	slowDetectPending atomic.Bool
 }
 
 func NewDaemon(cfg Config) (*Daemon, error) {
@@ -71,6 +72,27 @@ func (d *Daemon) addDeviceName(runtimes []RuntimeInfo) {
 	}
 }
 
+// fastDetectAndRegister does quick detection + immediate register.
+// Returns the generation after successful register.
+func (d *Daemon) fastDetectAndRegister(ctx context.Context) (uint64, error) {
+	runtimes := DetectRuntimesFast()
+	d.addDeviceName(runtimes)
+
+	resp, err := d.client.Register(ctx, d.buildRegisterRequest(runtimes))
+	if err != nil {
+		return 0, err
+	}
+
+	d.mu.Lock()
+	d.generation++
+	d.lastRuntimes = runtimes
+	d.registeredRuntimes = resp.Runtimes
+	gen := d.generation
+	d.mu.Unlock()
+
+	return gen, nil
+}
+
 func (d *Daemon) register(ctx context.Context) error {
 	runtimes := DetectRuntimesFast()
 	d.addDeviceName(runtimes)
@@ -99,8 +121,7 @@ func (d *Daemon) register(ctx context.Context) error {
 	d.mu.Unlock()
 	log.Printf("[INFO] registered %d runtime(s) with server (gen=%d)", len(resp.Runtimes), gen)
 
-	// Async enrich: slow OpenClaw agents detection
-	d.startSlowDetect(ctx, gen)
+	d.requestSlowDetect(ctx)
 	return nil
 }
 
@@ -117,49 +138,60 @@ func (d *Daemon) heartbeatLoop(ctx context.Context) error {
 			d.sendHeartbeats(ctx)
 
 			if d.heartbeatCount%4 == 0 {
-				d.mu.Lock()
-				gen := d.generation
-				d.mu.Unlock()
-				d.startSlowDetect(ctx, gen)
+				d.requestSlowDetect(ctx)
 			}
 		}
 	}
 }
 
-// startSlowDetect runs full detection (including slow OpenClaw agents list) in a
-// single-flight goroutine. Only one slow detect runs at a time. When it completes,
-// it only registers if the generation hasn't advanced (no newer state was committed).
-func (d *Daemon) startSlowDetect(ctx context.Context, startGen uint64) {
+// requestSlowDetect asks for a slow detection round. If one is already running,
+// sets pending flag so it will re-run when the current one finishes.
+func (d *Daemon) requestSlowDetect(ctx context.Context) {
 	if !d.slowDetectRunning.CompareAndSwap(false, true) {
-		return // another slow detect is already running
+		d.slowDetectPending.Store(true)
+		return
 	}
 
-	go func() {
-		defer d.slowDetectRunning.Store(false)
-
-		current := DetectRuntimesFast()
-		d.addDeviceName(current)
-		current = EnrichOpenclawAgents(current)
-
-		d.mu.Lock()
-		if d.generation != startGen {
-			// State advanced while we were detecting; discard stale result
-			d.mu.Unlock()
-			log.Printf("[DEBUG] slow detect discarded (gen %d → %d)", startGen, d.generation)
-			return
-		}
-		changed := runtimesChanged(d.lastRuntimes, current)
-		d.mu.Unlock()
-
-		if changed {
-			log.Printf("[INFO] runtime changes detected, re-registering...")
-			d.doRegister(ctx, current, startGen)
-		}
-	}()
+	go d.runSlowDetect(ctx)
 }
 
-// doRegister sends runtimes to server. Only commits state if generation matches
-// expectedGen (prevents stale async results from overwriting newer state).
+func (d *Daemon) runSlowDetect(ctx context.Context) {
+	defer func() {
+		d.slowDetectRunning.Store(false)
+
+		// If someone requested while we were busy, do another round
+		if d.slowDetectPending.CompareAndSwap(true, false) {
+			if d.slowDetectRunning.CompareAndSwap(false, true) {
+				go d.runSlowDetect(ctx)
+			}
+		}
+	}()
+
+	d.mu.Lock()
+	baseGen := d.generation
+	d.mu.Unlock()
+
+	current := DetectRuntimesFast()
+	d.addDeviceName(current)
+	current = EnrichOpenclawAgents(current)
+
+	// Early exit if generation advanced during detection
+	d.mu.Lock()
+	if d.generation != baseGen {
+		d.mu.Unlock()
+		log.Printf("[DEBUG] slow detect discarded (gen %d → %d)", baseGen, d.generation)
+		return
+	}
+	changed := runtimesChanged(d.lastRuntimes, current)
+	d.mu.Unlock()
+
+	if changed {
+		log.Printf("[INFO] runtime changes detected, re-registering...")
+		d.doRegister(ctx, current, baseGen)
+	}
+}
+
+// doRegister sends runtimes to server. Only commits if generation still matches.
 func (d *Daemon) doRegister(ctx context.Context, runtimes []RuntimeInfo, expectedGen uint64) {
 	resp, err := d.client.Register(ctx, d.buildRegisterRequest(runtimes))
 	if err != nil {
@@ -200,7 +232,6 @@ func (d *Daemon) sendHeartbeats(ctx context.Context) {
 	}
 	registered := make([]RegisteredRuntime, len(d.registeredRuntimes))
 	copy(registered, d.registeredRuntimes)
-	gen := d.generation
 	d.mu.Unlock()
 
 	needReRegister := false
@@ -218,8 +249,14 @@ func (d *Daemon) sendHeartbeats(ctx context.Context) {
 	}
 
 	if needReRegister {
-		log.Printf("[INFO] heartbeat failure detected, forcing re-register...")
-		d.startSlowDetect(ctx, gen)
+		log.Printf("[INFO] heartbeat failure detected, fast re-register + async enrich...")
+		gen, err := d.fastDetectAndRegister(ctx)
+		if err != nil {
+			log.Printf("[WARN] fast re-register failed: %v", err)
+		} else {
+			log.Printf("[INFO] fast re-registered (gen=%d), starting slow enrich...", gen)
+			d.requestSlowDetect(ctx)
+		}
 	}
 }
 
