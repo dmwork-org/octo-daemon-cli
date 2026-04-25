@@ -305,11 +305,16 @@ func runtimesChanged(old, current []RuntimeInfo) bool {
 	}
 	for _, r := range current {
 		prev, ok := oldMap[r.Provider]
-		if !ok || prev.Version != r.Version || prev.Status != r.Status || len(prev.Agents) != len(r.Agents) {
+		if !ok || prev.Version != r.Version || prev.Status != r.Status || len(prev.Agents) != len(r.Agents) || len(prev.Plugins) != len(r.Plugins) {
 			return true
 		}
 		for i, a := range r.Agents {
 			if i >= len(prev.Agents) || a.ID != prev.Agents[i].ID || a.Bindings != prev.Agents[i].Bindings {
+				return true
+			}
+		}
+		for i, p := range r.Plugins {
+			if i >= len(prev.Plugins) || p.Name != prev.Plugins[i].Name || p.Version != prev.Plugins[i].Version {
 				return true
 			}
 		}
