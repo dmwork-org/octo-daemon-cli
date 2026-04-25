@@ -333,11 +333,16 @@ func extractJSONArray(data []byte) []byte {
 		}
 	}
 
-	// Try 3: find first "[" byte and last "]" byte (single-line JSON in noisy output)
-	firstBracket := bytes.IndexByte(data, '[')
-	lastBracket := bytes.LastIndexByte(data, ']')
-	if firstBracket >= 0 && lastBracket > firstBracket {
-		candidate := data[firstBracket : lastBracket+1]
+	// Try 3: scan for each "[" and try pairing with last "]" after it
+	for i := 0; i < len(data); i++ {
+		if data[i] != '[' {
+			continue
+		}
+		lastBracket := bytes.LastIndexByte(data[i:], ']')
+		if lastBracket <= 0 {
+			continue
+		}
+		candidate := data[i : i+lastBracket+1]
 		var test []json.RawMessage
 		if json.Unmarshal(candidate, &test) == nil {
 			return candidate
