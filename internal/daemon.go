@@ -239,12 +239,25 @@ func (d *Daemon) sendHeartbeats(ctx context.Context) {
 		if offlineProviders[rt.Provider] {
 			continue
 		}
-		if err := d.client.Heartbeat(ctx, rt.ID); err != nil {
+		resp, err := d.client.Heartbeat(ctx, rt.ID)
+		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
 			log.Printf("[WARN] heartbeat failed for runtime %d (%s): %v", rt.ID, rt.Provider, err)
 			needReRegister = true
+			continue
+		}
+		// Handle pending ping request from server
+		if resp.PendingPing != nil {
+			go func(pp *PendingPing) {
+				daemonTS := time.Now().UnixMilli()
+				if err := d.client.ReportPing(ctx, pp.PingID, daemonTS); err != nil {
+					log.Printf("[WARN] ping report failed: %v", err)
+				} else {
+					log.Printf("[INFO] ping reported (id=%s, rtt≈%dms)", pp.PingID, daemonTS-pp.ServerTS)
+				}
+			}(resp.PendingPing)
 		}
 	}
 
