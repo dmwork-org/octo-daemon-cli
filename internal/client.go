@@ -32,6 +32,7 @@ func NewClient(apiURL, apiKey, cliVersion string) *Client {
 type RegisterRequest struct {
 	DaemonID   string        `json:"daemon_id"`
 	DeviceName string        `json:"device_name"`
+	DeviceInfo string        `json:"device_info"`
 	CLIVersion string        `json:"cli_version"`
 	Runtimes   []RuntimeInfo `json:"runtimes"`
 }

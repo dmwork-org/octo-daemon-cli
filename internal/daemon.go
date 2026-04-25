@@ -184,6 +184,7 @@ func (d *Daemon) buildRegisterRequest(runtimes []RuntimeInfo) RegisterRequest {
 	return RegisterRequest{
 		DaemonID:   d.daemonID,
 		DeviceName: d.cfg.DeviceName,
+		DeviceInfo: GetDeviceInfo(),
 		CLIVersion: d.cfg.CLIVersion,
 		Runtimes:   runtimes,
 	}

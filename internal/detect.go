@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	goruntime "runtime"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -32,6 +33,15 @@ type AgentEntry struct {
 	Bindings int      `json:"bindings"`
 	Default  bool     `json:"is_default"`
 	Routes   []string `json:"routes,omitempty"`
+}
+
+func GetDeviceInfo() string {
+	info := map[string]string{
+		"os":   goruntime.GOOS,
+		"arch": goruntime.GOARCH,
+	}
+	data, _ := json.Marshal(info)
+	return string(data)
 }
 
 var providers = map[string]string{
