@@ -2,6 +2,7 @@ package internal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -24,6 +25,7 @@ type Daemon struct {
 
 	slowDetectRunning atomic.Bool
 	slowDetectPending atomic.Bool
+	cancel            context.CancelFunc
 }
 
 func NewDaemon(cfg Config) (*Daemon, error) {
@@ -55,6 +57,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 		os.Remove(LockFilePath())
 	}()
 
+	ctx, cancel := context.WithCancel(ctx)
+	d.cancel = cancel
+
 	log.Printf("[INFO] daemon starting (id=%s, device=%s)", d.daemonID, d.cfg.DeviceName)
 
 	if err := d.register(ctx); err != nil {
@@ -80,6 +85,7 @@ func (d *Daemon) fastDetectAndRegister(ctx context.Context) (uint64, error) {
 
 	resp, err := d.client.Register(ctx, d.buildRegisterRequest(runtimes))
 	if err != nil {
+		d.checkForbidden(err)
 		return 0, err
 	}
 
@@ -110,6 +116,7 @@ func (d *Daemon) register(ctx context.Context) error {
 
 	resp, err := d.client.Register(ctx, d.buildRegisterRequest(runtimes))
 	if err != nil {
+		d.checkForbidden(err)
 		return err
 	}
 
@@ -195,6 +202,9 @@ func (d *Daemon) runSlowDetect(ctx context.Context) {
 func (d *Daemon) doRegister(ctx context.Context, runtimes []RuntimeInfo, expectedGen uint64) {
 	resp, err := d.client.Register(ctx, d.buildRegisterRequest(runtimes))
 	if err != nil {
+		if d.checkForbidden(err) {
+			return
+		}
 		log.Printf("[WARN] register failed: %v", err)
 		return
 	}
@@ -210,6 +220,16 @@ func (d *Daemon) doRegister(ctx context.Context, runtimes []RuntimeInfo, expecte
 	d.registeredRuntimes = resp.Runtimes
 	d.mu.Unlock()
 	log.Printf("[INFO] registered %d runtime(s) (gen=%d)", len(resp.Runtimes), expectedGen+1)
+}
+
+func (d *Daemon) checkForbidden(err error) bool {
+	var forbiddenErr *ForbiddenError
+	if errors.As(err, &forbiddenErr) {
+		log.Printf("[ERROR] API key rejected (403): user is no longer a member of this space. Stopping daemon.")
+		d.cancel()
+		return true
+	}
+	return false
 }
 
 func (d *Daemon) buildRegisterRequest(runtimes []RuntimeInfo) RegisterRequest {
@@ -242,6 +262,9 @@ func (d *Daemon) sendHeartbeats(ctx context.Context) {
 		resp, err := d.client.Heartbeat(ctx, rt.ID)
 		if err != nil {
 			if ctx.Err() != nil {
+				return
+			}
+			if d.checkForbidden(err) {
 				return
 			}
 			log.Printf("[WARN] heartbeat failed for runtime %d (%s): %v", rt.ID, rt.Provider, err)

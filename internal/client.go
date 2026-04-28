@@ -12,6 +12,14 @@ import (
 	"time"
 )
 
+type ForbiddenError struct {
+	Message string
+}
+
+func (e *ForbiddenError) Error() string {
+	return fmt.Sprintf("forbidden: %s", e.Message)
+}
+
 type Client struct {
 	baseURL    string
 	apiKey     string
@@ -118,6 +126,9 @@ func (c *Client) postJSON(ctx context.Context, path string, body any, result any
 		return fmt.Errorf("read response: %w", err)
 	}
 
+	if resp.StatusCode == 403 {
+		return &ForbiddenError{Message: string(respBody)}
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(respBody))
 	}
