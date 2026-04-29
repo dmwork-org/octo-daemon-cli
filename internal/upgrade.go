@@ -227,6 +227,9 @@ func extractTarGz(archive, destDir string) (string, error) {
 			continue
 		}
 		name := filepath.Base(hdr.Name)
+		if strings.HasPrefix(name, "._") {
+			continue
+		}
 		if strings.Contains(name, "octo-daemon") || strings.Contains(name, "octo_daemon") {
 			dest := filepath.Join(destDir, name)
 			out, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY, os.FileMode(hdr.Mode))
