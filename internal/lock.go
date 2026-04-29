@@ -7,11 +7,11 @@ import (
 )
 
 func LockFilePath() string {
-	return filepath.Join(dataDir(), "daemon.lock")
+	return filepath.Join(DataDir(), "daemon.lock")
 }
 
 func pidFilePath() string {
-	return filepath.Join(dataDir(), "daemon.pid")
+	return filepath.Join(DataDir(), "daemon.pid")
 }
 
 // TryLock attempts to acquire an exclusive lock on the lock file.

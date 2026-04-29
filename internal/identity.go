@@ -9,13 +9,13 @@ import (
 	"github.com/google/uuid"
 )
 
-func dataDir() string {
+func DataDir() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".octo-daemon")
 }
 
 func daemonIDPath() string {
-	return filepath.Join(dataDir(), "daemon.id")
+	return filepath.Join(DataDir(), "daemon.id")
 }
 
 func EnsureDaemonID() (string, error) {

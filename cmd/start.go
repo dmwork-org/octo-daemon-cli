@@ -23,33 +23,57 @@ var (
 	flagAPIURL     string
 	flagDeviceName string
 	flagForeground bool
+	flagConfigFile string
 )
 
 func init() {
-	startCmd.Flags().StringVar(&flagAPIKey, "api-key", "", "User API key for authentication (required)")
-	startCmd.Flags().StringVar(&flagAPIURL, "api-url", "", "Octo API server URL (required)")
+	startCmd.Flags().StringVar(&flagAPIKey, "api-key", "", "User API key for authentication")
+	startCmd.Flags().StringVar(&flagAPIURL, "api-url", "", "Octo API server URL")
 	startCmd.Flags().StringVar(&flagDeviceName, "device-name", "", "Device display name (defaults to hostname)")
 	startCmd.Flags().BoolVar(&flagForeground, "foreground", true, "Run in foreground (default: true)")
-
-	startCmd.MarkFlagRequired("api-key")
-	startCmd.MarkFlagRequired("api-url")
+	startCmd.Flags().StringVar(&flagConfigFile, "config", "", "Config file path (overrides api-key/api-url flags)")
 }
 
 func runStart(cmd *cobra.Command, args []string) error {
-	deviceName := flagDeviceName
-	if deviceName == "" {
+	var cfg internal.Config
+
+	// 如果有 --config，从文件加载
+	if flagConfigFile != "" {
+		loaded, err := internal.LoadConfig(flagConfigFile)
+		if err != nil {
+			return fmt.Errorf("load config: %w", err)
+		}
+		cfg = loaded
+	}
+
+	// 命令行参数覆盖配置文件
+	if flagAPIKey != "" {
+		cfg.APIKey = flagAPIKey
+	}
+	if flagAPIURL != "" {
+		cfg.APIURL = flagAPIURL
+	}
+	if flagDeviceName != "" {
+		cfg.DeviceName = flagDeviceName
+	}
+
+	if cfg.APIKey == "" || cfg.APIURL == "" {
+		return fmt.Errorf("api-key and api-url are required (via flags or --config)")
+	}
+
+	if cfg.DeviceName == "" {
 		hostname, err := os.Hostname()
 		if err != nil {
 			return fmt.Errorf("get hostname: %w", err)
 		}
-		deviceName = hostname
+		cfg.DeviceName = hostname
 	}
 
-	cfg := internal.Config{
-		APIKey:     flagAPIKey,
-		APIURL:     flagAPIURL,
-		DeviceName: deviceName,
-		CLIVersion: version,
+	cfg.CLIVersion = version
+
+	// 持久化配置（升级后新进程用）
+	if err := internal.SaveConfig(cfg); err != nil {
+		fmt.Printf("[WARN] failed to save config: %v\n", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

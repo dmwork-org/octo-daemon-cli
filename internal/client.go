@@ -70,9 +70,17 @@ type PendingPing struct {
 	PingID string `json:"ping_id"`
 }
 
+type PendingUpgrade struct {
+	TaskID        string `json:"task_id"`
+	DownloadURL   string `json:"download_url"`
+	TargetVersion string `json:"target_version"`
+	Checksum      string `json:"checksum"`
+}
+
 type HeartbeatResponse struct {
-	Status      string       `json:"status"`
-	PendingPing *PendingPing `json:"pending_ping,omitempty"`
+	Status         string          `json:"status"`
+	PendingPing    *PendingPing    `json:"pending_ping,omitempty"`
+	PendingUpgrade *PendingUpgrade `json:"pending_upgrade,omitempty"`
 }
 
 func (c *Client) Heartbeat(ctx context.Context, runtimeID int64) (*HeartbeatResponse, error) {
@@ -86,6 +94,12 @@ func (c *Client) Heartbeat(ctx context.Context, runtimeID int64) (*HeartbeatResp
 
 func (c *Client) ReportPing(ctx context.Context, pingID string) error {
 	return c.postJSON(ctx, "/v1/daemon/ping/"+pingID, map[string]string{}, nil)
+}
+
+func (c *Client) ReportUpgrade(ctx context.Context, taskID, status, errMsg string) error {
+	return c.postJSON(ctx, "/v1/daemon/upgrade/"+taskID, map[string]string{
+		"status": status, "error": errMsg,
+	}, nil)
 }
 
 type DeregisterRequest struct {

@@ -281,6 +281,10 @@ func (d *Daemon) sendHeartbeats(ctx context.Context) {
 				}
 			}(resp.PendingPing)
 		}
+		// Handle pending upgrade task from server
+		if resp.PendingUpgrade != nil {
+			go d.handleUpgrade(ctx, resp.PendingUpgrade)
+		}
 	}
 
 	if needReRegister {
