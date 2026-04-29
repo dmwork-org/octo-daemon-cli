@@ -71,9 +71,8 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	cfg.CLIVersion = version
 
-	// 持久化配置（升级后新进程用）
 	if err := internal.SaveConfig(cfg); err != nil {
-		fmt.Printf("[WARN] failed to save config: %v\n", err)
+		return fmt.Errorf("failed to save config (required for remote upgrade): %w", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
