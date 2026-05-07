@@ -34,6 +34,19 @@ func (d *Daemon) handlePluginUpgrade(ctx context.Context, up *PendingUpgrade) {
 	}
 	log.Printf("[INFO] plugin upgrade npx exited cleanly (task=%s)", up.TaskID)
 
+	// npx 退出只能保证 CLI 流程跑完，不能保证 openclaw gateway 已经带新插件起来。
+	// openclaw-channel-dmwork 的 install 脚本里 gateway restart 失败只打 warning，
+	// 会导致"磁盘插件升级+服务端关单 completed 但 gateway 还在跑旧插件"。
+	// 这里显式探 gateway，不通则上报 failed。
+	// 给 gateway 一点启动时间（用户 install 命令内部已经重启，但可能进程刚 spawn 还没 bind）。
+	time.Sleep(2 * time.Second)
+	if openclawBin, lookErr := exec.LookPath("openclaw"); lookErr == nil {
+		if !isOpenclawGatewayRunning(openclawBin) {
+			d.reportUpgrade(ctx, up.TaskID, "failed", "plugin installed but openclaw gateway is not running after restart")
+			return
+		}
+	}
+
 	// 主动触发 detect + register 加速关单，否则最多等 15s 心跳周期。
 	// openclaw gateway restart 需要几秒，先等一下再探测避免扫到旧进程。
 	go func() {
