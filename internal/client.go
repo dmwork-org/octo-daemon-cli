@@ -72,9 +72,11 @@ type PendingPing struct {
 
 type PendingUpgrade struct {
 	TaskID        string `json:"task_id"`
+	Component     string `json:"component"` // "octo-daemon" or "openclaw-channel-dmwork"
 	DownloadURL   string `json:"download_url"`
 	TargetVersion string `json:"target_version"`
 	Checksum      string `json:"checksum"`
+	Metadata      string `json:"metadata"` // 预留字段，插件升级未使用
 }
 
 type HeartbeatResponse struct {

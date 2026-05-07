@@ -19,6 +19,18 @@ import (
 )
 
 func (d *Daemon) handleUpgrade(ctx context.Context, up *PendingUpgrade) {
+	switch up.Component {
+	case "openclaw-channel-dmwork":
+		d.handlePluginUpgrade(ctx, up)
+	case "", "octo-daemon":
+		d.handleDaemonUpgrade(ctx, up)
+	default:
+		log.Printf("[ERROR] unsupported upgrade component: %s", up.Component)
+		d.reportUpgrade(ctx, up.TaskID, "failed", "unsupported component: "+up.Component)
+	}
+}
+
+func (d *Daemon) handleDaemonUpgrade(ctx context.Context, up *PendingUpgrade) {
 	log.Printf("[INFO] upgrade task received: %s → %s (task=%s)", d.cfg.CLIVersion, up.TargetVersion, up.TaskID)
 
 	// 0. 前置检查：当前二进制路径是否可写
