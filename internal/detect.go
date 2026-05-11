@@ -100,10 +100,11 @@ func DetectRuntimesFast() []RuntimeInfo {
 	return runtimes
 }
 
-// EnrichOpenclawRuntime runs the slow `openclaw agents list --json` and
-// `openclaw plugins list --json` in parallel for each openclaw runtime.
-// Failures on either probe are isolated — the other field still gets populated.
-// Call this asynchronously after initial fast registration.
+// EnrichOpenclawRuntime runs the slow `openclaw agents list --json`,
+// `openclaw agents bindings --json`, and `openclaw plugins list --json` in
+// parallel for each openclaw runtime. Failures on any probe are isolated —
+// the other fields still get populated. Call this asynchronously after initial
+// fast registration.
 func EnrichOpenclawRuntime(runtimes []RuntimeInfo) []RuntimeInfo {
 	enriched := make([]RuntimeInfo, len(runtimes))
 	copy(enriched, runtimes)
@@ -115,8 +116,9 @@ func EnrichOpenclawRuntime(runtimes []RuntimeInfo) []RuntimeInfo {
 
 		var agents []AgentEntry
 		var plugins []PluginInfo
+		var bindings map[string][]string
 		var wg sync.WaitGroup
-		wg.Add(2)
+		wg.Add(3)
 		go func() {
 			defer wg.Done()
 			agents = DetectOpenclawAgents(binPath)
@@ -125,7 +127,18 @@ func EnrichOpenclawRuntime(runtimes []RuntimeInfo) []RuntimeInfo {
 			defer wg.Done()
 			plugins = DetectOpenclawPlugins(binPath)
 		}()
+		go func() {
+			defer wg.Done()
+			bindings = DetectOpenclawBindings(binPath)
+		}()
 		wg.Wait()
+
+		// Merge bindings into agent.Routes. openclaw 2026.5.4+ moved routes
+		// out of `agents list` into a separate `agents bindings` command, so
+		// this is now the only path that populates routes.
+		if len(bindings) > 0 && len(agents) > 0 {
+			mergeBindingsIntoAgents(agents, bindings)
+		}
 
 		if len(agents) > 0 {
 			enriched[i].Agents = agents
