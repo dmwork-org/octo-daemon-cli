@@ -136,13 +136,29 @@ func (d *Daemon) handleComponentUpgrade(ctx context.Context, up *PendingUpgrade)
 	if lastErr != nil {
 		log.Printf("[WARN] post-upgrade enrich exhausted retries (last: %v), scheduling slow detect fallback", lastErr)
 		d.requestSlowDetect(ctx)
+		// register 失败时 d.lastRuntimes 还是旧版本，读出来做 pre/post
+		// 会误报 failed。后续 slow detect 成功注册会让服务端 register
+		// 关单；最坏情况走 sweeper timeout。这里直接返回。
+		return
 	}
 
-	// 校验版本是否推进：exit 0 但版本没变 = update CLI 假成功，主动 report failed。
-	// 版本是否精确达到 targetVersion 由服务端 register 关单负责（actual >= target 接受）。
+	// 版本校验（仅 register 成功后执行，lastRuntimes 此时是权威新版本）：
+	//   1) exit 0 但版本没变 → CLI 假成功
+	//   2) 版本变了但没到 target → update 升到了 latest 之前的版本
+	// 两种都主动 report failed，避免用户等到服务端 sweeper timeout。
 	postVersion := d.getRuntimeVersion(up.Component)
-	if preVersion != "" && postVersion != "" && postVersion == preVersion {
+	if postVersion == "" {
+		log.Printf("[WARN] could not detect %s version post-upgrade, relying on server close-out", up.Component)
+		return
+	}
+	if preVersion != "" && postVersion == preVersion {
 		msg := fmt.Sprintf("%s update exit 0 but version did not change (still %s)", up.Component, postVersion)
+		log.Printf("[WARN] %s", msg)
+		d.reportUpgrade(ctx, up.TaskID, "failed", msg)
+		return
+	}
+	if up.TargetVersion != "" && isVersionOlder(postVersion, up.TargetVersion) {
+		msg := fmt.Sprintf("%s update reached version %s but target was %s", up.Component, postVersion, up.TargetVersion)
 		log.Printf("[WARN] %s", msg)
 		d.reportUpgrade(ctx, up.TaskID, "failed", msg)
 		return

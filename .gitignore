@@ -1,5 +1,6 @@
 bin/
 dist/
+.gocache/
 *.exe
 *.dll
 *.so
