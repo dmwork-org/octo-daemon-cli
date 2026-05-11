@@ -22,6 +22,10 @@ type Daemon struct {
 	lastRuntimes       []RuntimeInfo
 	generation         uint64
 	heartbeatCount     int
+	// exitErr is set-once by requestExit; readExitErr consumes under d.mu.
+	// Populated when the daemon wants Run() to return a specific ExitError
+	// (403 → 78, upgrade → 75). Nil means "plain graceful shutdown, exit 0".
+	exitErr *ExitError
 
 	slowDetectRunning atomic.Bool
 	slowDetectPending atomic.Bool
@@ -48,7 +52,9 @@ func NewDaemon(cfg Config) (*Daemon, error) {
 func (d *Daemon) Run(ctx context.Context) error {
 	lockFile, err := TryLock()
 	if err != nil {
-		return err
+		// Lock conflict is a startup-level fatal (code 2). Under service
+		// manager the wrapper/Go main will map 2 → 0 to avoid restart loops.
+		return &ExitError{Code: 2, Message: fmt.Sprintf("acquire daemon lock: %v", err)}
 	}
 	d.lockFile = lockFile
 	defer func() {
@@ -63,12 +69,50 @@ func (d *Daemon) Run(ctx context.Context) error {
 	log.Printf("[INFO] daemon starting (id=%s, device=%s)", d.daemonID, d.cfg.DeviceName)
 
 	if err := d.register(ctx); err != nil {
+		// If register tripped checkForbidden, an ExitError{78} is already
+		// recorded via requestExit — return that in preference to the raw
+		// initial-registration error so main maps exit code correctly.
+		if ee := d.readExitErr(); ee != nil {
+			return ee
+		}
 		return fmt.Errorf("initial registration: %w", err)
 	}
 
 	defer d.deregister()
 
-	return d.heartbeatLoop(ctx)
+	hbErr := d.heartbeatLoop(ctx)
+
+	// Prefer the set-once ExitError (403 → 78, upgrade → 75) over the
+	// heartbeat loop's return. heartbeatLoop only returns on ctx.Done()
+	// today which yields nil, but keep this explicit for safety.
+	if ee := d.readExitErr(); ee != nil {
+		return ee
+	}
+	return hbErr
+}
+
+// requestExit records an ExitError to be returned from Run(). Set-once:
+// subsequent calls are ignored so the first signal (e.g. 403) isn't
+// overridden by a later one. Always paired with d.cancel() so the run loop
+// unwinds and returns via Run()'s tail.
+func (d *Daemon) requestExit(err *ExitError) {
+	if err == nil {
+		return
+	}
+	d.mu.Lock()
+	if d.exitErr == nil {
+		d.exitErr = err
+	}
+	d.mu.Unlock()
+	if d.cancel != nil {
+		d.cancel()
+	}
+}
+
+func (d *Daemon) readExitErr() *ExitError {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.exitErr
 }
 
 func (d *Daemon) addDeviceName(runtimes []RuntimeInfo) {
@@ -251,7 +295,10 @@ func (d *Daemon) checkForbidden(err error) bool {
 	var forbiddenErr *ForbiddenError
 	if errors.As(err, &forbiddenErr) {
 		log.Printf("[ERROR] API key rejected (403): user is no longer a member of this space. Stopping daemon.")
-		d.cancel()
+		// Record exit 78 (config-level fatal). Under service manager main
+		// maps 78 → 0 to prevent an infinite restart loop on a permanently
+		// bad api key.
+		d.requestExit(&ExitError{Code: 78, Message: "API key rejected: user is no longer a member of this space"})
 		return true
 	}
 	return false

@@ -133,7 +133,18 @@ func (d *Daemon) handleDaemonUpgrade(ctx context.Context, up *PendingUpgrade) {
 	// 10. restarting
 	d.reportUpgrade(ctx, up.TaskID, "restarting", "")
 
-	// 11. fork 一个 shell 脚本等旧进程退出后再启动新二进制
+	// 11. 分两种重启路径：
+	//   - 在 service manager 下运行：exit 75 让 launchd/systemd 拉起新二进制。
+	//     从 daemon 内部调 systemctl restart 会被 cgroup stop 连累，launchctl
+	//     kickstart 时序也不稳。exit-code 驱动更可靠（见 plan §五）。
+	//   - 非 service：保留原 shell 脚本路径，用户手工 start 也能自恢复。
+	if os.Getenv("OCTO_DAEMON_UNDER_SERVICE") == "1" {
+		log.Printf("[INFO] under service manager, exiting 75 to request respawn")
+		d.requestExit(&ExitError{Code: 75, Message: "upgrade respawn"})
+		return
+	}
+
+	// 11b (legacy path). fork 一个 shell 脚本等旧进程退出后再启动新二进制。
 	configPath := ConfigFilePath()
 	pid := os.Getpid()
 	lockPath := LockFilePath()
