@@ -85,7 +85,9 @@ func TestParseOpenclawPluginsJSON_UsesIDAsName(t *testing.T) {
 	}
 }
 
-func TestParseOpenclawPluginsJSON_EmptyPlugins(t *testing.T) {
+func TestParseOpenclawPluginsJSON_EmptyPluginsArray(t *testing.T) {
+	// "plugins: []" is a legitimate state (nothing enabled on this host).
+	// Must not error, must return empty slice.
 	got, err := parseOpenclawPluginsJSON([]byte(`{"plugins":[]}`))
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -95,14 +97,14 @@ func TestParseOpenclawPluginsJSON_EmptyPlugins(t *testing.T) {
 	}
 }
 
-func TestParseOpenclawPluginsJSON_NoPluginsField(t *testing.T) {
-	// Object without plugins key — no error, empty slice.
-	got, err := parseOpenclawPluginsJSON([]byte(`{"registry":{}}`))
-	if err != nil {
-		t.Fatalf("err: %v", err)
+func TestParseOpenclawPluginsJSON_NoPluginsField_Errors(t *testing.T) {
+	// Object without plugins key → schema-invalid. Must error so caller
+	// falls back to the directory scan (Fix 1: schema drift safety).
+	if _, err := parseOpenclawPluginsJSON([]byte(`{"registry":{}}`)); err == nil {
+		t.Error("expected error when plugins field missing")
 	}
-	if len(got) != 0 {
-		t.Errorf("expected empty, got %+v", got)
+	if _, err := parseOpenclawPluginsJSON([]byte(`{"error":"bad"}`)); err == nil {
+		t.Error("expected error on error-shaped object without plugins field")
 	}
 }
 
@@ -120,30 +122,39 @@ warning: something
 	}
 }
 
+func TestParseOpenclawPluginsJSON_NoisyJSONBeforeReal(t *testing.T) {
+	// Regression guard for Fix 2: if a prefix log line contains a self-
+	// contained JSON object (e.g. structured log), the scanner must skip
+	// it and find the real plugins object that follows.
+	input := `{"level":"info","msg":"starting"}
+{"trace":"abc","ignored":true}
+{"plugins":[{"id":"openclaw-channel-dmwork","version":"0.6.0","enabled":true}]}`
+	got, err := parseOpenclawPluginsJSON([]byte(input))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "openclaw-channel-dmwork" {
+		t.Errorf("expected dmwork plugin after log noise, got %+v (err=%v)", got, err)
+	}
+}
+
+func TestParseOpenclawPluginsJSON_TrailingJunkAfterObject(t *testing.T) {
+	// Noise after the plugins object (e.g. a trailing log line) should not
+	// cause extraction to fail. First candidate wins.
+	input := `{"plugins":[{"id":"openclaw-channel-dmwork","version":"0.6.0","enabled":true}]}
+bye`
+	got, err := parseOpenclawPluginsJSON([]byte(input))
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("expected 1 plugin, got %+v", got)
+	}
+}
+
 func TestParseOpenclawPluginsJSON_Malformed(t *testing.T) {
 	_, err := parseOpenclawPluginsJSON([]byte(`not json at all`))
 	if err == nil {
 		t.Error("expected error on malformed input")
-	}
-}
-
-func TestExtractJSONObject_Trivial(t *testing.T) {
-	if got := extractJSONObject([]byte(`{"a":1}`)); string(got) != `{"a":1}` {
-		t.Errorf("got %q", got)
-	}
-}
-
-func TestExtractJSONObject_WithPrefix(t *testing.T) {
-	input := `noise line
-{"a":1}`
-	got := extractJSONObject([]byte(input))
-	if string(got) != `{"a":1}` {
-		t.Errorf("got %q", got)
-	}
-}
-
-func TestExtractJSONObject_NoBraces(t *testing.T) {
-	if got := extractJSONObject([]byte(`no json`)); got != nil {
-		t.Errorf("expected nil, got %q", got)
 	}
 }

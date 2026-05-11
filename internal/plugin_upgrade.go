@@ -53,11 +53,31 @@ func (d *Daemon) handlePluginUpgrade(ctx context.Context, up *PendingUpgrade) {
 	//   - 更糟：runtimesChanged 判定可能 false（如果插件 name/version 其他字段稳定），
 	//     register 根本不发，任务永远 timeout。
 	// enrich 内部要跑 openclaw plugins list --json，给 60s 上限。
-	enrichCtx, enrichCancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer enrichCancel()
-	if _, err := d.enrichDetectAndRegister(enrichCtx); err != nil {
-		log.Printf("[WARN] post-upgrade enrich register failed: %v", err)
+	//
+	// 失败做有限次指数退避重试（0/5/10s，总共 ~15s），全部失败再调度一次 slow detect
+	// 让心跳周期兜底，避免"插件实际已升级但任务走 10min timeout"。
+	const maxAttempts = 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			backoff := time.Duration(attempt*5) * time.Second
+			select {
+			case <-ctx.Done():
+				log.Printf("[WARN] post-upgrade enrich register aborted: %v", ctx.Err())
+				return
+			case <-time.After(backoff):
+			}
+		}
+		enrichCtx, enrichCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		_, lastErr = d.enrichDetectAndRegister(enrichCtx)
+		enrichCancel()
+		if lastErr == nil {
+			return
+		}
+		log.Printf("[WARN] post-upgrade enrich register attempt %d/%d failed: %v", attempt+1, maxAttempts, lastErr)
 	}
+	log.Printf("[WARN] post-upgrade enrich register exhausted retries (last: %v), scheduling slow detect fallback", lastErr)
+	d.requestSlowDetect(ctx)
 }
 
 func truncateOutput(s string, max int) string {

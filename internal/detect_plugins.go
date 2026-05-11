@@ -24,25 +24,67 @@ type openclawPluginJSON struct {
 	Origin  string `json:"origin"`
 }
 
+// openclawPluginsListJSON uses a pointer slice so we can distinguish
+// "plugins: []" (valid, means no enabled plugins) from "no plugins field"
+// (invalid schema — should trigger CLI fallback).
 type openclawPluginsListJSON struct {
-	Plugins []openclawPluginJSON `json:"plugins"`
+	Plugins *[]openclawPluginJSON `json:"plugins"`
 }
 
 // parseOpenclawPluginsJSON parses output of `openclaw plugins list --json`.
 // Returns only enabled plugins as PluginInfo{Name: id, Version: version}.
 // Name field on the wire is the npm/id string (not the human display name) because
 // the server and frontend match plugins by name == "openclaw-channel-dmwork".
+//
+// Missing plugins field → error (so caller can fall back to directory scan).
+// Empty plugins array → nil slice, no error (legitimate "nothing enabled").
+// Noise before/after the JSON object is tolerated via candidate scanning.
 func parseOpenclawPluginsJSON(data []byte) ([]PluginInfo, error) {
-	obj := extractJSONObject(data)
-	if obj == nil {
-		return nil, fmt.Errorf("no JSON object found in output")
+	// Fast path: whole input is the JSON object.
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '{' {
+		if plugins, err := decodePluginsObject(trimmed); err == nil {
+			return plugins, nil
+		}
 	}
+
+	// Slow path: scan for each '{' position, try to decode an object there
+	// using json.Decoder. Skip past consumed bytes on success so we don't
+	// re-scan inside nested braces.
+	for i := 0; i < len(data); i++ {
+		if data[i] != '{' {
+			continue
+		}
+		dec := json.NewDecoder(bytes.NewReader(data[i:]))
+		var probe map[string]json.RawMessage
+		if err := dec.Decode(&probe); err != nil {
+			continue
+		}
+		consumed := int(dec.InputOffset())
+		candidate := data[i : i+consumed]
+		if plugins, err := decodePluginsObject(candidate); err == nil {
+			return plugins, nil
+		}
+		// Candidate parsed as JSON but wasn't the plugins shape; jump past
+		// it rather than restarting one byte later (avoids re-entering a
+		// sub-object that just got validated).
+		if consumed > 1 {
+			i += consumed - 1
+		}
+	}
+	return nil, fmt.Errorf("no JSON object with 'plugins' field found in output")
+}
+
+func decodePluginsObject(data []byte) ([]PluginInfo, error) {
 	var raw openclawPluginsListJSON
-	if err := json.Unmarshal(obj, &raw); err != nil {
-		return nil, fmt.Errorf("unmarshal plugins list: %w", err)
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	if raw.Plugins == nil {
+		return nil, fmt.Errorf("no plugins field")
 	}
 	var out []PluginInfo
-	for _, p := range raw.Plugins {
+	for _, p := range *raw.Plugins {
 		if !p.Enabled {
 			continue
 		}
@@ -52,33 +94,6 @@ func parseOpenclawPluginsJSON(data []byte) ([]PluginInfo, error) {
 		out = append(out, PluginInfo{Name: p.ID, Version: p.Version})
 	}
 	return out, nil
-}
-
-// extractJSONObject extracts a top-level JSON object from output that may have
-// prefix/suffix noise. Most of the time openclaw plugins list --json emits pure
-// JSON on stdout (warnings go to stderr), but we guard against future changes.
-func extractJSONObject(data []byte) []byte {
-	trimmed := bytes.TrimSpace(data)
-	if len(trimmed) > 0 && trimmed[0] == '{' {
-		var probe map[string]json.RawMessage
-		if json.Unmarshal(trimmed, &probe) == nil {
-			return trimmed
-		}
-	}
-	start := bytes.IndexByte(data, '{')
-	if start < 0 {
-		return nil
-	}
-	last := bytes.LastIndexByte(data, '}')
-	if last <= start {
-		return nil
-	}
-	candidate := data[start : last+1]
-	var probe map[string]json.RawMessage
-	if json.Unmarshal(candidate, &probe) == nil {
-		return candidate
-	}
-	return nil
 }
 
 // detectOpenclawPluginsViaCLI runs `openclaw plugins list --json` and returns
