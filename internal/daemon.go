@@ -99,6 +99,31 @@ func (d *Daemon) fastDetectAndRegister(ctx context.Context) (uint64, error) {
 	return gen, nil
 }
 
+// enrichDetectAndRegister does full detection (fast + slow openclaw enrich)
+// and unconditionally re-registers. Used after plugin upgrades so the server
+// sees the new plugin version in metadata.plugins immediately (required by the
+// close-out path in modules/runtime/api.go::completeUpgradeIfMatchedWithRuntime).
+func (d *Daemon) enrichDetectAndRegister(ctx context.Context) (uint64, error) {
+	runtimes := DetectRuntimesFast()
+	d.addDeviceName(runtimes)
+	runtimes = EnrichOpenclawRuntime(runtimes)
+
+	resp, err := d.client.Register(ctx, d.buildRegisterRequest(runtimes))
+	if err != nil {
+		d.checkForbidden(err)
+		return 0, err
+	}
+
+	d.mu.Lock()
+	d.generation++
+	d.lastRuntimes = runtimes
+	d.registeredRuntimes = resp.Runtimes
+	gen := d.generation
+	d.mu.Unlock()
+
+	return gen, nil
+}
+
 func (d *Daemon) register(ctx context.Context) error {
 	runtimes := DetectRuntimesFast()
 	d.addDeviceName(runtimes)
@@ -180,7 +205,7 @@ func (d *Daemon) runSlowDetect(ctx context.Context) {
 
 	current := DetectRuntimesFast()
 	d.addDeviceName(current)
-	current = EnrichOpenclawAgents(current)
+	current = EnrichOpenclawRuntime(current)
 
 	// Early exit if generation advanced during detection
 	d.mu.Lock()
@@ -332,18 +357,48 @@ func runtimesChanged(old, current []RuntimeInfo) bool {
 	}
 	for _, r := range current {
 		prev, ok := oldMap[r.Provider]
-		if !ok || prev.Version != r.Version || prev.Status != r.Status || len(prev.Agents) != len(r.Agents) || len(prev.Plugins) != len(r.Plugins) {
+		if !ok || prev.Version != r.Version || prev.Status != r.Status {
 			return true
 		}
-		for i, a := range r.Agents {
-			if i >= len(prev.Agents) || a.ID != prev.Agents[i].ID || a.Bindings != prev.Agents[i].Bindings {
-				return true
-			}
+		if agentsChanged(prev.Agents, r.Agents) {
+			return true
 		}
-		for i, p := range r.Plugins {
-			if i >= len(prev.Plugins) || p.Name != prev.Plugins[i].Name || p.Version != prev.Plugins[i].Version {
-				return true
-			}
+		if pluginsChanged(prev.Plugins, r.Plugins) {
+			return true
+		}
+	}
+	return false
+}
+
+func agentsChanged(old, current []AgentEntry) bool {
+	if len(old) != len(current) {
+		return true
+	}
+	oldMap := make(map[string]AgentEntry, len(old))
+	for _, a := range old {
+		oldMap[a.ID] = a
+	}
+	for _, a := range current {
+		prev, ok := oldMap[a.ID]
+		if !ok || prev.Bindings != a.Bindings || prev.Default != a.Default {
+			return true
+		}
+	}
+	return false
+}
+
+func pluginsChanged(old, current []PluginInfo) bool {
+	if len(old) != len(current) {
+		return true
+	}
+	oldMap := make(map[string]string, len(old))
+	for _, p := range old {
+		oldMap[p.Name] = p.Version
+	}
+	for _, p := range current {
+		prev, ok := oldMap[p.Name]
+		if !ok || prev != p.Version {
+			return true
 		}
 	}
 	return false

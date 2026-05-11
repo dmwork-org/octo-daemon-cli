@@ -4,14 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
-	"os"
 	"os/exec"
 	goruntime "runtime"
-	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -84,10 +84,8 @@ func DetectRuntimesFast() []RuntimeInfo {
 				Status:   status,
 				Path:     binPath,
 			}
-			// Plugins from filesystem are fast, include them
-			if provider == "openclaw" {
-				rt.Plugins = detectOpenclawPlugins()
-			}
+			// Plugins detection is moved to the slow enrich path (EnrichOpenclawRuntime),
+			// because `openclaw plugins list --json` needs openclaw init (seconds).
 			ch <- result{rt: rt, found: true}
 		}(provider, binary)
 	}
@@ -102,27 +100,63 @@ func DetectRuntimesFast() []RuntimeInfo {
 	return runtimes
 }
 
-// EnrichOpenclawAgents runs the slow `openclaw agents list --json` and returns
-// the enriched runtimes. Call this asynchronously after initial registration.
-func EnrichOpenclawAgents(runtimes []RuntimeInfo) []RuntimeInfo {
+// EnrichOpenclawRuntime runs the slow `openclaw agents list --json` and
+// `openclaw plugins list --json` in parallel for each openclaw runtime.
+// Failures on either probe are isolated — the other field still gets populated.
+// Call this asynchronously after initial fast registration.
+func EnrichOpenclawRuntime(runtimes []RuntimeInfo) []RuntimeInfo {
 	enriched := make([]RuntimeInfo, len(runtimes))
 	copy(enriched, runtimes)
 	for i := range enriched {
-		if enriched[i].Provider == "openclaw" && enriched[i].Path != "" {
-			agents := DetectOpenclawAgents(enriched[i].Path)
-			if len(agents) > 0 {
-				enriched[i].Agents = agents
-				log.Printf("[INFO]   └─ %d agent(s): %s", len(agents), agentIDs(agents))
-			}
+		if enriched[i].Provider != "openclaw" || enriched[i].Path == "" {
+			continue
+		}
+		binPath := enriched[i].Path
+
+		var agents []AgentEntry
+		var plugins []PluginInfo
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			agents = DetectOpenclawAgents(binPath)
+		}()
+		go func() {
+			defer wg.Done()
+			plugins = DetectOpenclawPlugins(binPath)
+		}()
+		wg.Wait()
+
+		if len(agents) > 0 {
+			enriched[i].Agents = agents
+			log.Printf("[INFO]   └─ %d agent(s): %s", len(agents), agentIDs(agents))
+		}
+		if len(plugins) > 0 {
+			enriched[i].Plugins = plugins
+			log.Printf("[INFO]   └─ %d plugin(s): %s", len(plugins), pluginNames(plugins))
 		}
 	}
 	return enriched
 }
 
+// EnrichOpenclawAgents is kept as a thin alias for callers that haven't migrated
+// to EnrichOpenclawRuntime. New code should use EnrichOpenclawRuntime directly.
+func EnrichOpenclawAgents(runtimes []RuntimeInfo) []RuntimeInfo {
+	return EnrichOpenclawRuntime(runtimes)
+}
+
+func pluginNames(plugins []PluginInfo) string {
+	names := make([]string, len(plugins))
+	for i, p := range plugins {
+		names[i] = fmt.Sprintf("%s@%s", p.Name, p.Version)
+	}
+	return "[" + strings.Join(names, ", ") + "]"
+}
+
 // DetectRuntimes does full detection including slow operations (backward compat).
 func DetectRuntimes() []RuntimeInfo {
 	runtimes := DetectRuntimesFast()
-	return EnrichOpenclawAgents(runtimes)
+	return EnrichOpenclawRuntime(runtimes)
 }
 
 
@@ -268,42 +302,6 @@ func stripAnsi(s string) string {
 type PluginInfo struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
-}
-
-func detectOpenclawPlugins() []PluginInfo {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil
-	}
-	extDir := filepath.Join(home, ".openclaw", "extensions")
-	entries, err := os.ReadDir(extDir)
-	if err != nil {
-		return nil
-	}
-
-	var plugins []PluginInfo
-	for _, entry := range entries {
-		if !entry.IsDir() || strings.HasSuffix(entry.Name(), ".bak") || entry.Name() == "node_modules" {
-			continue
-		}
-		pkgPath := filepath.Join(extDir, entry.Name(), "package.json")
-		data, err := os.ReadFile(pkgPath)
-		if err != nil {
-			continue
-		}
-		var pkg struct {
-			Name    string `json:"name"`
-			Version string `json:"version"`
-		}
-		if json.Unmarshal(data, &pkg) != nil || pkg.Name == "" {
-			continue
-		}
-		plugins = append(plugins, PluginInfo{
-			Name:    pkg.Name,
-			Version: pkg.Version,
-		})
-	}
-	return plugins
 }
 
 // extractJSONArray extracts a JSON array from output that may have non-JSON
