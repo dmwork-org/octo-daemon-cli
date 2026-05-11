@@ -239,8 +239,11 @@ func detectVersion(binPath string) string {
 	}
 
 	raw := strings.TrimSpace(string(out))
-	if m := versionRe.FindString(raw); m != "" {
-		return m
+	// 正则捕获组 [1] 拿到剥掉 "v" 前缀的纯数字版本。
+	// 不用 FindString —— 那个会把 "v0.13.0" 整体返回，破坏服务端
+	// (daemon_id, component, version) 关单匹配（target 侧都是无 v 的）。
+	if m := versionRe.FindStringSubmatch(raw); len(m) > 1 && m[1] != "" {
+		return m[1]
 	}
 	return raw
 }
