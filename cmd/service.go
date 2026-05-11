@@ -74,13 +74,22 @@ func runServiceInstall(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Precheck 1: config must exist (v1 only supports the default path).
+	// Precheck 1: config must exist and have required fields. v1 only
+	// supports the default path. We don't just LoadConfig (which merely
+	// parses JSON) — also assert api_key / api_url are non-empty to mirror
+	// start.go's validation. Otherwise an empty `{}` config would let
+	// install succeed, then daemon exits 2, under-service maps 2→0, launchd
+	// treats as success → "installed but never ran" UX.
 	cfgPath := internal.ConfigFilePath()
 	if _, err := os.Stat(cfgPath); err != nil {
 		return fmt.Errorf("daemon config not found at %s — run `octo-daemon start --api-key=... --api-url=...` once to establish config, then retry", cfgPath)
 	}
-	if _, err := internal.LoadConfig(cfgPath); err != nil {
+	cfg, err := internal.LoadConfig(cfgPath)
+	if err != nil {
 		return fmt.Errorf("daemon config at %s is invalid: %w", cfgPath, err)
+	}
+	if cfg.APIKey == "" || cfg.APIURL == "" {
+		return fmt.Errorf("daemon config at %s is missing api_key or api_url — run `octo-daemon start --api-key=... --api-url=...` once to re-establish, then retry", cfgPath)
 	}
 
 	// Precheck 2: refuse double-install without --force.
