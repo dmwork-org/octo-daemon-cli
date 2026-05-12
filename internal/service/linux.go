@@ -96,9 +96,12 @@ func (*systemdUserService) Uninstall() error {
 		return err
 	}
 
-	// Best-effort stop + disable; ignore errors if unit isn't present.
+	// Order matters: stop → remove files → daemon-reload.
+	// Reloading BEFORE removing the unit leaves systemd's in-memory cache
+	// still referencing the deleted file on disk; reloading AFTER gives a
+	// clean uninstall state. Errors on the stop step are ignored — unit
+	// may already be absent.
 	_, _ = runSystemctlUser("disable", "--now", systemdUnit)
-	_, _ = runSystemctlUser("daemon-reload")
 
 	for _, p := range []string{unitPath, WrapperScriptPath(), EnvFilePath()} {
 		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -107,6 +110,8 @@ func (*systemdUserService) Uninstall() error {
 	}
 	// Prune service-env dir if empty (best-effort).
 	_ = os.Remove(ServiceEnvDir())
+
+	_, _ = runSystemctlUser("daemon-reload")
 	return nil
 }
 
